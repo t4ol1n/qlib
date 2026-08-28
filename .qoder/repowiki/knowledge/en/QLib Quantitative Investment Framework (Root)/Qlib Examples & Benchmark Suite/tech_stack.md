@@ -1,0 +1,1 @@
+Python examples driven by Qlib's `qrun` CLI and `qlib.workflow.R` experiment manager (MLflow-backed); batch orchestration uses Python `fire` for CLI dispatch, `ruamel.yaml` for config parsing, and subprocess-driven conda environment isolation per benchmark model. Some benchmarks ship pre-trained artifacts (e.g. `GRU/model_gru_csi300.pkl`, `HIST/qlib_csi300_stock_index.npy`).

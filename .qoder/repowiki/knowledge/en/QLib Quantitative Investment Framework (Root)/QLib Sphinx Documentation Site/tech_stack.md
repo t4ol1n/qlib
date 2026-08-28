@@ -1,0 +1,1 @@
+Sphinx with `sphinx_rtd_theme`, `sphinx.ext.autodoc`, `sphinx.ext.napoleon`, `sphinx.ext.mathjax`; version string sourced dynamically from `importlib.metadata.version('pyqlib')`.

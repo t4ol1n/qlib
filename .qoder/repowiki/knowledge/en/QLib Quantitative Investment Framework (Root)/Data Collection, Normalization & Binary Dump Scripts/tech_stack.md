@@ -1,0 +1,1 @@
+Python with pandas/numpy for data manipulation, `fire` for CLI dispatch, `joblib` + `concurrent.futures` (ProcessPool/ThreadPool) for parallelism, `loguru` for logging, `tqdm` for progress bars, `yahooquery` for Yahoo Finance access, and Qlib's internal `qlib.utils`/`qlib.data` APIs for calendar/instrument handling and binary I/O.

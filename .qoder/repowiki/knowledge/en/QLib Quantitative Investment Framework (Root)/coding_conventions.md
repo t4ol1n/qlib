@@ -1,0 +1,4 @@
+- Code style enforced uniformly across `qlib` and `scripts` via Black (line length 120), Pylint, Flake8, and Mypy configured at the repository root.
+- Optional feature sets are declared as pip extras in `pyproject.toml` and installed through `Makefile` targets (e.g., `rl`, `dev`, `docs`, `test`) rather than per-submodule requirements files.
+- Versioning is derived from git tags via setuptools-scm and written into `qlib/_version.py` at build time.
+- CLI entry points are registered centrally in `pyproject.toml` (`qrun = qlib.cli.run:run`) instead of per-module setup scripts.

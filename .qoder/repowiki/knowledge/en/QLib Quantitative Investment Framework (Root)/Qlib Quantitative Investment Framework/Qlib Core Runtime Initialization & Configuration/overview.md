@@ -1,0 +1,1 @@
+Provides Qlib's package bootstrap, global configuration management, logging infrastructure, shared constants, and type hints used to initialize the runtime before any data or workflow components are loaded.

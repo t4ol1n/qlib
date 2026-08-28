@@ -1,0 +1,1 @@
+Pytest-based test suite covering QLib's end-to-end workflow, backtesting strategies, data pipeline, RL training, and subsystems such as storage, ops, and datasets.

@@ -1,0 +1,1 @@
+Package bootstrap goes through `qlib.config` and `qlib.log` before any other submodule is imported; experiment/task workflows are launched via `qlib.cli.run` and `qlib.workflow` rather than direct script invocation.

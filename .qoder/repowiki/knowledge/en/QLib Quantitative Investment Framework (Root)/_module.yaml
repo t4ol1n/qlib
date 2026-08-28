@@ -1,0 +1,28 @@
+schema_version: 1
+module_path: ""
+title: QLib Quantitative Investment Framework (Root)
+scope:
+    - README.md
+    - CHANGES.rst
+    - CODE_OF_CONDUCT.md
+    - SECURITY.md
+    - pyproject.toml
+    - setup.py
+    - Makefile
+    - Dockerfile
+    - .github/
+    - .mypy.ini
+    - .pre-commit-config.yaml
+    - .pylintrc
+    - .readthedocs.yaml
+    - .commitlintrc.js
+    - .deepsource.toml
+    - .dockerignore
+    - .gitignore
+    - CHANGELOG.md
+    - LICENSE
+    - MANIFEST.in
+    - build_docker_image.sh
+source_files: []
+depends_on: []
+related_to: []

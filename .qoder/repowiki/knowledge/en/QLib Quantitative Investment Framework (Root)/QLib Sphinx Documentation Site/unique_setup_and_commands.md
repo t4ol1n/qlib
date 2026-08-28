@@ -1,0 +1,1 @@
+Build from within `docs/`: `make html` (or any Sphinx target) automatically runs `pip install -r requirements.txt` first via the Makefile's catch-all rule; `make.bat` provides Windows equivalents.

@@ -1,0 +1,1 @@
+Pydantic v2 `BaseSettings` with `env_prefix='QLIB_'` and `env_nested_delimiter='_'` for environment-driven configuration; ruamel.yaml (`YAML(typ='safe', pure=True)`) for safe YAML parsing of project configs; Python `logging.dictConfig` for structured log setup; subprocess-based NFS mounting with platform detection (Windows `mount -o anon` vs Linux `mount.nfs`).

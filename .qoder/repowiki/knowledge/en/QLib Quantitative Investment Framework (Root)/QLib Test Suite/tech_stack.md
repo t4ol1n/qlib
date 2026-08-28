@@ -1,0 +1,1 @@
+pytest with custom `slow` marker; unittest-style base class `TestAutoData` from `qlib.tests`; MLflow via `qlib.workflow.R` for experiment tracking; Tianshou + PyTorch for RL trainer tests; pandas/numpy for data assertions.

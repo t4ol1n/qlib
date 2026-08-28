@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: examples
+title: Qlib Examples & Benchmark Suite
+scope:
+    - examples/
+source_files: []
+depends_on: []
+related_to:
+    - path: qlib_core

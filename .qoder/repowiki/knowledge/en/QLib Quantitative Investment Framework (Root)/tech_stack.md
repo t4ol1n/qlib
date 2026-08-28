@@ -1,0 +1,1 @@
+Python ≥3.8 with setuptools/setuptools-scm build backend; optional extras for ML (lightgbm, tianshou, torch), data (pandas, pyarrow, pymongo, redis), and workflow (mlflow, jupyter); Cython+C++ extensions for rolling/expanding window calculations; Sphinx + Read the Docs for docs; pytest + nbqa for testing notebooks.

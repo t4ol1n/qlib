@@ -1,0 +1,1 @@
+Top-level package that wires Qlib's data, model, strategy, backtest, RL, workflow, and CLI layers into a unified quantitative research and trading framework.

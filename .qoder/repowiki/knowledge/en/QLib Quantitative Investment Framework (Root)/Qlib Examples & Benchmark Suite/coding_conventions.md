@@ -1,0 +1,5 @@
+- Each benchmark model lives in its own `benchmarks/<Model>/` directory containing a `README.md`, `requirements.txt`, and one or more `workflow_config_<model>_<dataset>.yaml` files named to match the dataset/universe suffixes (e.g. `_Alpha158`, `_Alpha360`, `_csi500`).
+- Programmatic workflows initialize Qlib via `qlib.init(...)`, then assemble tasks using dict configs passed to `init_instance_by_config` and record experiments through `with R.start(...)` blocks using `SignalRecord`, `SigAnaRecord`, and `PortAnaRecord`.
+- CLI entry points expose functionality via `fire.Fire(SomeClass)` so users can invoke methods like `get_data()` or `run(...)` directly from the command line.
+- Examples depend only on the installed `qlib` package and external libraries listed in per-example `requirements.txt`; there is no shared intra-module package, so each example is independently executable.
+- Batch orchestration scripts discover models by scanning `benchmarks/*/` directories and select configs via glob patterns matching `<dataset><universe>.yaml`, keeping model selection declarative rather than hard-coded.

@@ -1,0 +1,6 @@
+- Heavy dependencies (e.g., `qlib.config`, `qlib.data.cache`, `qlib.utils`, `qlib.workflow`) are imported lazily inside function bodies to break circular import cycles at package load time.
+- Global mutable state is exposed as a module-level singleton instance (`C = QlibConfig(...)`) rather than via classes, and accessed through dict-like `__getitem__`/`__setattr__` proxies.
+- Configuration is organized as a base `_default_config` dict merged with mode-specific overlays (`MODE_CONF['client'|'server']`) and region presets (`_default_region_config[region]`) during `set()`.
+- Logging is obtained exclusively through `get_module_logger(name)` which auto-prefixes non-`qlib.*` names and caches per-module `QlibLogger` instances instead of calling `logging.getLogger` directly.
+- Cross-cutting string literals (region codes, URI types, cache names) are defined once in `constant.py` and referenced by name rather than duplicated inline.
+- Public type aliases for configuration shapes (`InstConf`, `InstDictConf`) are expressed as `typing_extensions`-backed `TypedDict`s so they work uniformly across Python versions.

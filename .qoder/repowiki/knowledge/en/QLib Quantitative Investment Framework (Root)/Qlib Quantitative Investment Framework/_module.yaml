@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: qlib_core
+title: Qlib Quantitative Investment Framework
+scope:
+    - qlib/
+source_files: []
+depends_on: []
+related_to:
+    - path: docs
+    - path: examples
+    - path: scripts
+    - path: tests

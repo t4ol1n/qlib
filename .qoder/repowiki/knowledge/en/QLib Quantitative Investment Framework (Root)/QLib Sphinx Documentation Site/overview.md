@@ -1,0 +1,1 @@
+Sphinx-based documentation site for QLib, organizing user guides, component references, developer notes, API docs, and changelog into a navigable HTML/EPUB/LaTeX build.

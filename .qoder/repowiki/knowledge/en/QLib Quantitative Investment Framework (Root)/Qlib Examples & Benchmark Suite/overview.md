@@ -1,0 +1,1 @@
+Collection of runnable examples, end-to-end workflows, and benchmark implementations demonstrating how to train alpha models, backtest portfolios, and use Qlib's data/strategy components.

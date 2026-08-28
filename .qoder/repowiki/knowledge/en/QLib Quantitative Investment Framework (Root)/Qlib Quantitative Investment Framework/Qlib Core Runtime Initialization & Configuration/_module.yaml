@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: qlib_core/core_runtime
+title: Qlib Core Runtime Initialization & Configuration
+scope:
+    - qlib/__init__.py
+    - qlib/config.py
+    - qlib/constant.py
+    - qlib/log.py
+    - qlib/typehint.py
+source_files: []
+depends_on: []
+related_to: []

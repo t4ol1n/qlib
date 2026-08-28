@@ -1,0 +1,4 @@
+- Documentation pages are written in reStructuredText (`.rst`) and organized one topic per file under a purpose-specific subdirectory.
+- Top-level navigation is declared exclusively through `.. toctree::` blocks in `index.rst`, grouped by captioned sections rather than scattered links.
+- Images and other static assets are referenced via relative paths under `_static/img/...` and embedded directly in RST files instead of being hosted externally.
+- Autodoc-generated API content uses consistent options (`members=True`, `member-order=bysource`, `special-members=__init__`) defined centrally in `conf.py`.

@@ -1,0 +1,1 @@
+Top-level packaging, build, and development orchestration for the QLib quantitative research framework that unifies data, models, strategies, backtesting, RL, examples, docs, and tests under a single pip-installable package.

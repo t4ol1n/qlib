@@ -1,0 +1,1 @@
+Python package with Cython extensions (`data/_libs/*.pyx`) for rolling/expanding window computations; PyTorch-based models in `contrib/model/pytorch_*`; optional XGBoost/CatBoost models; pandas/numpy-backed data structures throughout.

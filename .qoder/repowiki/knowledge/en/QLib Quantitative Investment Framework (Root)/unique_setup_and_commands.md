@@ -1,0 +1,1 @@
+`make dev` installs the package in editable mode plus all dev/lint/docs/test/analysis/rl extras and builds the Cython extensions; `make lint` runs black/pylint/flake8/mypy/nbqa over both `qlib` and `scripts`; `make docs-gen` builds Sphinx docs to `public/`; `make build` produces wheels via `python -m build`; `make upload` publishes via twine.

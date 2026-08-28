@@ -1,0 +1,1 @@
+Run all tests with `pytest -v tests/`; skip slow tests with `-m "not slow"`; RL tests are automatically skipped on non-Linux platforms via `conftest.py`'s `collect_ignore` logic.

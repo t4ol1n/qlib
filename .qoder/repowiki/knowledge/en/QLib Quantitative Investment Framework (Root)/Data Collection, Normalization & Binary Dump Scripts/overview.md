@@ -1,0 +1,1 @@
+Python scripts that download market data from multiple sources (Yahoo, CN/US/Brazil indices, crypto, funds), normalize it into Qlib's CSV format, and dump it into Qlib's binary feature/calendar/instrument storage.

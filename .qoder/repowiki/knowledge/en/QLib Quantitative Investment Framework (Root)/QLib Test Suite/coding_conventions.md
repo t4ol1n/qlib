@@ -1,0 +1,6 @@
+- Integration tests use configuration-driven instantiation via `init_instance_by_config` with task configs from `qlib.tests.config` rather than hard-coded objects.
+- Slow or resource-intensive tests are tagged with `@pytest.mark.slow` so they can be deselected with the `slow` marker.
+- Tests that create temporary MLflow runs store their URI path in a class attribute and remove it in `tearDownClass` to avoid polluting the workspace.
+- RL tests define minimal mock implementations of `Simulator`, `StateInterpreter`, `ActionInterpreter`, and `Reward` to exercise the `Trainer` without real environments.
+- Assertions compare numeric results with small tolerances (e.g., `abs(a - b) < 1e-8`) rather than exact equality for floating-point outputs.
+- Each feature area groups related tests into its own subdirectory with a per-package README when the scope warrants explanation.

@@ -1,0 +1,4 @@
+- Each sub-package exposes its public API through a thin `__init__.py` that re-exports core classes, keeping internal modules private.
+- Base classes and abstract interfaces are defined in dedicated `base.py` files under each sub-package and imported by concrete implementations in the same package.
+- User-extensible components (models, strategies, datasets, processors) follow a plugin pattern where contrib packages implement the same base interfaces as the core ones.
+- Global configuration and logging are accessed via singleton-style accessors in `qlib.config` and `qlib.log` rather than passed as arguments.
