@@ -1,0 +1,11 @@
+# Local data cache and run artifacts (large / regenerable)
+data/
+output/
+mlruns/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/

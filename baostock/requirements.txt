@@ -1,0 +1,38 @@
+# Dependencies for the baostock -> QLib test project.
+# Validated with pyqlib 0.9.7 on Python 3.11 (Windows): numpy 2.4.x, pandas 2.3.x,
+# scipy 1.17.x, lightgbm 4.7.x, baostock 0.9.3, plotly 5.24.x (<6, see below).
+#
+#   conda create -y -n baostock_qlib python=3.11
+#   conda run -n baostock_qlib pip install -r baostock/requirements.txt
+#
+# NOTE: the prebuilt pyqlib wheel ships compiled Cython _libs built for numpy 2.x, so we
+# deliberately do NOT force numpy<2.0 (that would risk an ABI mismatch). pandas is capped
+# <3 because pandas 3.0 is incompatible with qlib 0.9.7. plotly is capped <6 because
+# qlib.contrib.report.graph imports plotly.figure_factory.create_distplot, which was
+# REMOVED in plotly 6.0 -- with plotly>=6 the chart export raises ImportError at import time.
+# pyqlib already brings: pyyaml, mlflow, redis, dill, fire, ruamel.yaml, tqdm, pymongo,
+# loguru, lightgbm, gym, cvxpy, joblib, matplotlib, jupyter, nbconvert, pyarrow,
+# pydantic-settings, scikit-learn, setuptools-scm.
+
+pyqlib>=0.9.7
+numpy>=1.23,<3
+pandas>=1.5,<3
+scipy>=1.8
+
+# Data source
+baostock
+
+# TimescaleDB / PostgreSQL sink (baostock/db/*). psycopg 3 is used for its native
+# COPY support (bulk-loading ~2.1M daily bars) and works with the installed SQLAlchemy 2.0.
+# The binary wheel bundles libpq, so no local PostgreSQL client build is required.
+psycopg[binary]>=3.1
+
+# Reporting / charts
+plotly<6
+statsmodels
+
+# Utilities used by the collector / runner scripts
+fire
+loguru
+tqdm
+pyarrow
