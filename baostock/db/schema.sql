@@ -434,3 +434,126 @@ SELECT add_continuous_aggregate_policy('daily_bar_monthly',
     end_offset       => INTERVAL '1 day',
     schedule_interval => INTERVAL '1 day',
     if_not_exists    => TRUE);
+
+-- --------------------------------------------------------------------------- --
+-- 9. Selection results (daily top-K picks + realized returns)
+-- --------------------------------------------------------------------------- --
+-- Written by db/record_selection.py: one `selection_run` header per (signal_date, strategy_key)
+-- plus one `selection_pick` row per stock it chose.
+--
+-- Deliberately PLAIN tables, not hypertables: the volume is ~12.5k rows/year (50 picks x 250
+-- trading days), so chunking would cost more than it saves. More importantly `refresh_returns`
+-- UPDATEs already-stored rows repeatedly, and on a compressed hypertable that would first need the
+-- compression policy removed and the chunks decompressed.
+CREATE TABLE IF NOT EXISTS selection_run (
+    signal_date     date        NOT NULL,                -- the trading day the picks are FOR
+    strategy_key    text        NOT NULL,                -- sha1 of the config that produced them
+    experiment_name text,
+    experiment_id   text,
+    recorder_id     text,
+    model_class     text,                                -- LGBModel
+    market          text,                                -- csi300
+    benchmark       text,                                -- SH000300
+    topk            integer,
+    n_drop          integer,
+    segments        jsonb,                               -- train / valid / test windows
+    metrics         jsonb,                               -- IC, ICIR, excess return, drawdown, ...
+    n_picks         integer     NOT NULL DEFAULT 0,
+    source          text,                                -- workflow | show | backfill | cli
+    pred_csv        text,                                -- provenance: which file it came from
+    run_at          timestamptz NOT NULL DEFAULT now(),   -- when this run was first recorded
+    updated_at      timestamptz NOT NULL DEFAULT now(),   -- refreshed on every overwrite
+    PRIMARY KEY (signal_date, strategy_key)
+);
+COMMENT ON COLUMN selection_run.signal_date IS
+    'The trading day the picks apply to (the max date of the prediction matrix), NOT the day the '
+    'job ran. A job run on the morning of D produces signal_date D-1, so conflating the two shifts '
+    'every by-date query by a day. Use run_at / updated_at for the execution time.';
+COMMENT ON COLUMN selection_run.strategy_key IS
+    'sha1 fingerprint of (experiment_name, model_class, market, topk, n_drop, segments). Re-running '
+    'the SAME config overwrites this row; changing topk or model yields a new key, so variants '
+    'coexist and stay comparable. v_selection_latest resolves the newest one per signal_date.';
+
+CREATE TABLE IF NOT EXISTS selection_pick (
+    signal_date     date     NOT NULL,
+    strategy_key    text     NOT NULL,
+    rank            smallint NOT NULL,                   -- 1..topk by descending score
+    symbol          text     NOT NULL,                   -- SH600000
+    code            text,                                -- sh.600000
+    code_name       text,                                -- Chinese name AS OF the run (companies
+                                                         -- get renamed, so snapshot it)
+    score           double precision,
+    industry        text,                                -- CSRC industry, denormalised for grouping
+    is_csi300_now   boolean,
+    -- Realized returns, filled in later by refresh_returns (NULL until the exit day has bars).
+    ret_t1          numeric(12,6),
+    ret_t5          numeric(12,6),
+    ret_t20         numeric(12,6),
+    excess_t1       numeric(12,6),                       -- ret_tN minus the SH000300 return
+    excess_t5       numeric(12,6),
+    excess_t20      numeric(12,6),
+    ret_computed_at timestamptz,
+    loaded_at       timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (signal_date, strategy_key, symbol),
+    FOREIGN KEY (signal_date, strategy_key)
+        REFERENCES selection_run (signal_date, strategy_key) ON DELETE CASCADE
+);
+-- Serves "the top-K table for one day" and the per-date performance aggregate.
+CREATE INDEX IF NOT EXISTS idx_selection_pick_date   ON selection_pick (signal_date DESC, rank);
+-- Serves "every time this symbol was picked" (hit-rate per stock, pick frequency).
+CREATE INDEX IF NOT EXISTS idx_selection_pick_symbol ON selection_pick (symbol, signal_date DESC);
+
+-- When several strategy_keys exist for one signal_date, keep only the most recently updated run so
+-- everyday queries see exactly one pick per symbol per day.
+-- Joins instrument by explicit ON (not USING): USING merges the columns and a later qualified
+-- reference to them is ambiguous in PostgreSQL.
+DROP VIEW IF EXISTS v_selection_latest CASCADE;
+CREATE VIEW v_selection_latest AS
+SELECT DISTINCT ON (p.signal_date, p.symbol)
+    p.signal_date,
+    p.rank,
+    p.symbol,
+    p.code,
+    COALESCE(p.code_name, i.code_name)       AS code_name,
+    p.score,
+    p.industry,
+    COALESCE(p.is_csi300_now, i.is_csi300_now) AS is_csi300_now,
+    p.ret_t1,
+    p.ret_t5,
+    p.ret_t20,
+    p.excess_t1,
+    p.excess_t5,
+    p.excess_t20,
+    p.ret_computed_at,
+    p.strategy_key,
+    r.topk,
+    r.experiment_name,
+    r.updated_at
+FROM selection_pick p
+JOIN selection_run r
+  ON r.signal_date = p.signal_date AND r.strategy_key = p.strategy_key
+LEFT JOIN instrument i ON i.symbol = p.symbol
+ORDER BY p.signal_date, p.symbol, r.updated_at DESC;
+
+-- Per-day scoreboard. The hit-rate denominator is count(excess_tN), NOT count(*): rows whose exit
+-- day has no bars yet are still NULL and must not drag the rate down.
+DROP VIEW IF EXISTS v_selection_performance CASCADE;
+CREATE VIEW v_selection_performance AS
+SELECT
+    signal_date,
+    count(*)          AS n_picks,
+    avg(score)        AS avg_score,
+    avg(ret_t1)       AS avg_ret_t1,
+    avg(ret_t5)       AS avg_ret_t5,
+    avg(ret_t20)      AS avg_ret_t20,
+    avg(excess_t1)    AS avg_excess_t1,
+    avg(excess_t5)    AS avg_excess_t5,
+    avg(excess_t20)   AS avg_excess_t20,
+    count(excess_t1)  AS n_scored_t1,
+    count(excess_t5)  AS n_scored_t5,
+    count(excess_t20) AS n_scored_t20,
+    count(*) FILTER (WHERE excess_t1  > 0)::numeric / NULLIF(count(excess_t1),  0) AS hit_rate_t1,
+    count(*) FILTER (WHERE excess_t5  > 0)::numeric / NULLIF(count(excess_t5),  0) AS hit_rate_t5,
+    count(*) FILTER (WHERE excess_t20 > 0)::numeric / NULLIF(count(excess_t20), 0) AS hit_rate_t20
+FROM v_selection_latest
+GROUP BY signal_date;

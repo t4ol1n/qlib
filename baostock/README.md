@@ -255,7 +255,7 @@ $env:PGPASSWORD="postgres"; $env:PGDATABASE="astock"
 conda run -n baostock_qlib python baostock\run_db.py init         # create db + extension + apply db/schema.sql
 conda run -n baostock_qlib python baostock\run_db.py load-local   # stage 1: bars from the local CSV cache
 conda run -n baostock_qlib python baostock\run_db.py sync-sector  # stage 2: boards/metadata from baostock
-conda run -n baostock_qlib python baostock\run_db.py verify       # 36 checks against the CSV cache
+conda run -n baostock_qlib python baostock\run_db.py verify       # 49 checks against the CSV cache
 conda run -n baostock_qlib python baostock\run_db.py all          # init + stage 1 + stage 2 + verify
 ```
 
@@ -272,6 +272,8 @@ conda run -n baostock_qlib python baostock\run_db.py all          # init + stage
 - Compression is handled transparently — the loaders drop the compression policy and decompress the
   chunks they are about to touch, then restore both afterwards.
 - `verify` exits **1** when any error-level check fails, so it is usable in CI; warnings do not.
+- Two further subcommands, **`record-selection`** and **`refresh-returns`**, store the daily stock
+  selection and its realized returns. They are documented in **section 10**.
 
 ### 9.3 Schema
 
@@ -288,6 +290,7 @@ conda run -n baostock_qlib python baostock\run_db.py all          # init + stage
 | `v_instrument_csi300_now`, `v_daily_bar_csi300`, `v_daily_bar_adj_csi300` | views | **default** surface — current members only |
 | `v_instrument_all`, `v_daily_bar_all`, `v_daily_bar_adj_all`, `v_daily_bar_trading` | views | **full** surface — all 700 union symbols, opt-in |
 | `v_industry_latest`, `v_board_latest`, `v_index_membership_latest` | views | newest snapshot per symbol / board |
+| `selection_run`, `selection_pick` + 2 views | tables / views | the daily top-K picks and their realized returns — **section 10** |
 
 Both hypertables use `compress_segmentby = 'symbol'` and `compress_orderby = 'trade_date DESC'` with
 a 90-day `add_compression_policy`. The continuous aggregates are created `WITH NO DATA`, back-filled
@@ -319,7 +322,7 @@ After `init` + `load-local` + `sync-sector` + `verify` on this machine:
 | `stock_board` | **58,444** rows across 8 `board_type`s |
 | `daily_bar_weekly` / `daily_bar_monthly` | 405,243 / 95,564 rows |
 | on disk | `daily_bar` 129 MB in 14 chunks (**14 compressed**); `index_daily_bar` 1632 kB |
-| `verify` | **36 checks, 0 failed, 1 warning** |
+| `verify` | **49 checks, 0 failed, 1 warning** |
 
 `stock_board` by type — 51 quarter-end snapshots spanning 2014-03-31 … 2026-09-03 unless noted:
 
@@ -377,3 +380,152 @@ symbols have `last_close_adj != last_close` — i.e. the back-adjust factor real
 - **Membership is quarter-end sampled**, the same approximation as `instruments/csi300.txt` noted in
   section 7, so `stock_board` cannot resolve intra-quarter index changes.
 - **Do not add an `__init__.py` to this folder** — see section 8.
+
+## 10. Selection results in the database
+
+Sections 1–3 answer “which stocks does the model pick today?”; this section makes the answer
+**queryable by date**. One `selection_run` row per (signal date, strategy) carries the config
+fingerprint and the run's IC/return metrics, and one `selection_pick` row per chosen stock carries
+its rank, code, Chinese name, score, industry and — once known — its realized T+1/T+5/T+20 return
+and excess over `SH000300`. Everything here is derived from files already on disk and bars already
+in the database: **zero baostock calls, zero model calls.**
+
+### 10.1 Usage
+
+```powershell
+# from the QLib repo root
+conda run -n baostock_qlib python baostock\run_db.py record-selection               # latest signal date only
+conda run -n baostock_qlib python baostock\run_db.py record-selection --backfill     # every date in output/pred.csv
+conda run -n baostock_qlib python baostock\run_db.py refresh-returns                 # fill realized T+1/T+5/T+20
+conda run -n baostock_qlib python baostock\run_db.py all --with-returns              # …and recompute before verify
+```
+
+`run_workflow.py` and `run_workflow.py show` record the selection **automatically** as their last
+step, so a normal daily run needs no extra command. The write is *best-effort*: a database that is
+down or not yet migrated only produces a `WARNING`, because the CSV and the log table are already
+written by then and must never be lost to a storage problem. Turn it off with `--with-db=False`
+(there is no `--no-with-db` — see the fire note in section 8).
+
+Useful flags: `--pred-csv` / `--selection-csv` (read a different file), `--topk N` (re-rank the
+backfill at a different K), `--with-db=False` (**dry run**: logs the date range, pick count and
+`strategy_key` that *would* be written, without opening a connection), `--horizons 1,5`,
+`--force` (recompute returns that are already filled, e.g. after a bar reload).
+
+### 10.2 Schema
+
+| Object | Kind | Contents |
+|---|---|---|
+| `selection_run` | table | one row per `(signal_date, strategy_key)`: experiment/recorder ids, `model_class`, `market`, `benchmark`, `topk`, `n_drop`, `segments` and `metrics` as `jsonb`, `n_picks`, `source`, `pred_csv`, `run_at`, `updated_at` |
+| `selection_pick` | table | one row per chosen stock: `rank`, `symbol`, `code`, `code_name`, `score`, `industry`, `is_csi300_now`, `ret_t1/t5/t20`, `excess_t1/t5/t20`, `ret_computed_at`; PK `(signal_date, strategy_key, symbol)`, FK → `selection_run` `ON DELETE CASCADE` |
+| `v_selection_latest` | view | one row per `(signal_date, symbol)`: when several strategies exist for a day it keeps the most recently updated one, and fills a missing name from `instrument` |
+| `v_selection_performance` | view | per-day scoreboard: `n_picks`, `avg_score`, the three average returns and excesses, `n_scored_tN`, and `hit_rate_tN` |
+
+Both are **plain tables, deliberately not hypertables**. The volume is ~12.5 k rows/year (50 picks ×
+250 sessions), where chunking would cost more than it saves — and `refresh-returns` UPDATEs
+already-stored rows repeatedly, which on a compressed hypertable would first mean dropping the
+compression policy and decompressing the chunks. Two B-tree indexes serve the two access patterns:
+`(signal_date DESC, rank)` for “the top-K table for one day”, `(symbol, signal_date DESC)` for
+“every time this stock was picked”.
+
+### 10.3 `signal_date` is not the run date
+
+`signal_date` is the trading day the picks are **for** — the maximum date of the prediction matrix.
+A job executed on the morning of D produces `signal_date = D-1`. Conflating the two shifts every
+by-date query by a day, so the execution time is stored separately: `run_at` is when this
+`(date, strategy)` was **first** recorded and is never overwritten, `updated_at` moves on every
+re-record, and `selection_pick.loaded_at` does the same per row.
+
+### 10.4 Re-running: overwrite vs. coexist
+
+`strategy_key` is the first 16 hex of `sha1(canonical_json({experiment_name, model_class, market,
+topk, n_drop, segments}))`. Only those six fields participate, so a new recorder id or a different
+account size does **not** mint a new key and orphan the previous picks:
+
+- **Same config again** → same key → the same rows are overwritten (`updated_at` refreshes, `run_at`
+  stays). Verified: a full 20,300-row backfill re-run left both the pick and the run checksums
+  byte-identical.
+- **Different `topk` or model** → new key → the variants **coexist** and stay comparable side by
+  side; `v_selection_latest` picks the newest per day.
+
+Picks are written **delete-the-range, then `COPY`** inside one transaction rather than upserted,
+because a top-K set can *shrink*: `--topk 50` followed by `--topk 10` would leave ranks 11–50 behind
+as stale rows under a plain `ON CONFLICT DO UPDATE`. The audit trail is the existing `sync_log`
+(`task = 'record_selection'` / `'refresh_returns'`), not a separate version table.
+
+### 10.5 How the returns are computed
+
+`refresh-returns` fills `ret_tN` and `excess_tN` with one set-based `UPDATE … FROM` per horizon:
+
+- **Entry** is the back-adjusted close (`close * factor`) **on the signal date**, and requires
+  `trade_status = 1` — a stock suspended that day could not actually have been bought, so it is left
+  `NULL` rather than priced off a stale bar.
+- **Exit** is the first tradable adjusted close **on or after** the T+N session, so a suspension at
+  the exit rolls forward to the next session instead of producing a bogus price.
+- **T+N counts trading days, not calendar days**, taken from `trade_calendar` via `row_number()`. All
+  picks of one signal date therefore share a single exit day and stay cross-sectionally comparable.
+- **Benchmark** legs come from `index_daily_bar` (`SH000300`), which is stored **unadjusted** — an
+  index has no corporate actions to adjust for, so its factor is 1 by definition.
+- Both values are `round(…, 6)`; `excess_tN = ret_tN − benchmark return` over the same window.
+
+The command is **repeatable and cheap**: by default only rows still `NULL` are touched, so each
+horizon is computed exactly once, on the first run after its exit day has bars. A non-zero
+`still_null` for recent dates is expected, not an error.
+
+`hit_rate_tN` in `v_selection_performance` divides by `count(excess_tN)`, **not** `count(*)`: rows
+whose exit day has not happened yet are still `NULL` and must not drag the rate down.
+
+### 10.6 Measured state
+
+After `init` + `record-selection --backfill` + `refresh-returns` + `verify` on this machine:
+
+| | |
+|---|---|
+| `selection_run` | **406** rows, one per signal date 2025-01-02 … 2026-09-03, all `strategy_key = d815bcd24bbf4963` |
+| `selection_pick` | **20,300** rows (406 × 50); `code_name` filled for **20,300**, `industry` for **20,297** |
+| `refresh-returns` | t1 **20,250** filled / 50 pending · t5 **20,050** / 250 · t20 **19,300** / 1,000 — exactly 1 / 5 / 20 sessions × 50 picks short of the 2026-09-03 bar frontier |
+| second `refresh-returns` | `updated=0` on all three horizons (idempotent) |
+| pooled hit rate | t1 **47.8 %** · t5 **48.7 %** · t20 **48.6 %** |
+| average excess | t1 **+0.098 %** · t5 **+0.507 %** · t20 **+1.524 %** |
+| `verify` | **49 checks, 0 failed, 1 warning** (the pre-existing 674/700 industry warning) |
+
+The 13 new `selection` checks cover: object presence, `n_picks` vs. the actual child rows, every
+`signal_date` being a real session, ranks being exactly `1..n` per group, every symbol existing in
+`instrument`, `ret_computed_at` being set wherever a return is, no return priced beyond the bar
+frontier, and — the strongest one — an **independent re-derivation** of `ret_tN`/`excess_tN` over a
+deterministic sample of 10 signal dates. That cross-check uses `ORDER BY … OFFSET n` over
+`trade_calendar` and prices off the stored `close_adj` column, whereas the write path uses
+`row_number()` and `close * factor`, so agreement validates the calendar arithmetic and the
+adjustment arithmetic separately instead of re-running one implementation against itself.
+
+The two headline queries:
+
+```sql
+-- daily scoreboard
+SELECT signal_date, n_picks, avg_excess_t5, hit_rate_t5, hit_rate_t20
+FROM v_selection_performance ORDER BY signal_date DESC;
+
+-- one day's full top-50, with Chinese names, industry and realized returns
+SELECT "rank", symbol, code, code_name, score, industry,
+       ret_t1, excess_t1, ret_t5, excess_t5, ret_t20, excess_t20
+FROM v_selection_latest WHERE signal_date = DATE '2026-08-06' ORDER BY "rank";
+```
+
+### 10.7 Known limitations
+
+- **The backfill only reaches as far back as `pred.csv` does** — the test segment, currently
+  2025-01-01 onward. `pred.csv` holds predictions for that window only; recovering earlier history
+  means re-running the workflow with an earlier `--test` segment, not re-running this command.
+- **`ret_t20` is necessarily `NULL` for the last ~20 sessions**, `ret_t5` for the last ~5 and
+  `ret_t1` for the final one: their exit days have no bars yet. This is the `still_null` count above
+  and it shrinks by itself as the database is updated.
+- **These returns are NOT the backtest's returns.** They are equal-weighted single-stock returns of
+  “buy at the signal-date close, sell at the T+N close”, with no `n_drop` turnover, no transaction
+  cost and no position sizing. `TopkDropoutStrategy`'s portfolio return in `metrics.json` includes
+  all three, so the two numbers answer different questions and must not be compared directly.
+- **A stock suspended on the signal date is never scored** for any horizon — there is no honest entry
+  price. It stays `NULL` forever rather than being back-filled from a stale bar.
+- **`industry` is the current CSRC snapshot** (section 9.6), so grouping historical picks by industry
+  uses today's classification, not the one in force on the signal date.
+- **Only T+1 / T+5 / T+20 exist.** They are fixed columns, not dynamic DDL; another horizon needs a
+  schema change plus an entry in `HORIZONS`, which is also what keeps the f-string-built column names
+  in the UPDATE safe from injection.

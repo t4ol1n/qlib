@@ -25,6 +25,10 @@ local ``qlib`` source instead of the installed wheel)::
 
 ``show`` re-derives the selection (with names) from the cached ``output/pred.csv``: no training, no
 ``qlib.init``, no baostock call, so it is the cheap way to refresh the table after a completed run.
+
+Both paths also mirror the selection into the ``astock`` database (``selection_run`` / ``selection_pick``,
+see ``db/record_selection.py`` and README section 10). That write is best-effort -- a database that is
+down never costs you the CSV -- and is skipped with ``--with-db=False``.
 """
 from __future__ import annotations
 
@@ -257,6 +261,25 @@ def _export_charts(pred, label, report_normal, out_dir) -> list:
     return paths
 
 
+def _record_selection_db(sel, meta=None, metrics=None, source="workflow", pred_csv=None) -> None:
+    """Mirror the selection into the ``astock`` database (best-effort, never fatal).
+
+    Same contract as ``_export_charts``: the CSV and the log table are already written by the time
+    this runs, so a database that is down, un-migrated, or missing ``psycopg`` must not cost the user
+    the selection they just trained for. Both the import and the write are guarded, because the
+    import alone fails when the optional DB dependencies are absent.
+    """
+    try:
+        from db.record_selection import record_selection as _record
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"db.record_selection is unavailable ({e}); selection not recorded")
+        return
+    try:
+        _record(sel, meta=meta, metrics=metrics, source=source, pred_csv=pred_csv)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"recording the selection to the database failed: {e}")
+
+
 # --------------------------------------------------------------------------- #
 # entry point
 # --------------------------------------------------------------------------- #
@@ -270,6 +293,7 @@ def run_workflow(
     account: float = None,
     output_dir=None,
     with_charts: bool = True,
+    with_db: bool = True,
     handler_start: str = None,
     handler_end: str = None,
     fit_start: str = None,
@@ -361,16 +385,26 @@ def run_workflow(
     )
     if with_charts:
         _export_charts(pred, label, report_normal, output_dir)
+    if with_db:
+        # After _export_metrics, not inside _export_selection: the meta/metrics objects that make a
+        # stored row self-describing are only complete here, and _export_selection is shared with the
+        # `show` path that has neither.
+        _record_selection_db(
+            sel, meta=meta, metrics=metrics, source="workflow", pred_csv=output_dir / "pred.csv",
+        )
 
     logger.info("step 2 done: selection + metrics + charts written to output/")
     return {"metrics": metrics, "selection": sel, "recorder_id": rec_id}
 
 
-def show_selection(pred_csv=None, topk: int = None, out_dir=None) -> pd.DataFrame:
+def show_selection(pred_csv=None, topk: int = None, out_dir=None, with_db: bool = True) -> pd.DataFrame:
     """Re-export + print the latest-date top-K selection (with names) from a cached ``pred.csv``.
 
     Deliberately free of ``qlib.init`` / training / baostock access: it only re-reads what a previous
     run already produced, so adding the stock names to an existing result never means retraining.
+
+    ``--with-db=False`` skips the database mirror. Note fire has no ``--no-with-db`` form for a
+    parameter that defaults to True (README section 8).
     """
     out_dir = Path(out_dir or config.OUTPUT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -387,6 +421,19 @@ def show_selection(pred_csv=None, topk: int = None, out_dir=None) -> pd.DataFram
     sel, latest = _export_selection(pred, out_dir, topk, _load_stock_names())
     _log_selection(sel, latest)
     logger.info(f"selection -> {out_dir / 'selected_stocks_latest.csv'}")
+    if with_db:
+        # This path has no live meta object, so recover it from the metrics.json a previous run left
+        # behind; load_meta_from_output degrades to a reduced meta (and a warning) when it is absent.
+        # The import is inside the guard too: without psycopg even importing the module fails, and
+        # `show` must still print the table.
+        try:
+            from db.record_selection import load_meta_from_output
+
+            meta, metrics = load_meta_from_output(config.OUTPUT_DIR)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"could not recover meta from metrics.json ({e}); recording a reduced row")
+            meta, metrics = {}, {}
+        _record_selection_db(sel, meta=meta, metrics=metrics, source="show", pred_csv=pred_csv)
     return sel
 
 

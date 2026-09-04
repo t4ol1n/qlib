@@ -13,6 +13,7 @@ Check groups:
     boards      industry coverage of the current members (a warning until stage 2 has run)
     aggregate   weekly continuous aggregate vs a manual ``time_bucket`` over the same rows
     storage     chunk counts and on-disk sizes
+    selection   the recorded top-K picks and their realized returns (all ``warn`` while empty)
 
 Returns a list of check dicts and exits non-zero when any ``error``-level check fails.
 """
@@ -53,8 +54,19 @@ EXPECTED_VIEWS = [
 ]
 EXPECTED_CAGGS = ["daily_bar_weekly", "daily_bar_monthly"]
 EXPECTED_HYPERTABLES = ["daily_bar", "index_daily_bar"]
+SELECTION_TABLES = ["selection_run", "selection_pick"]
+SELECTION_VIEWS = ["v_selection_latest", "v_selection_performance"]
 SAMPLE_SYMBOLS = 10
 SAMPLE_SEED = 20240904
+
+# Tolerance for comparing two stored returns. Both sides are ``round(x, 6)``, so the smallest
+# representable disagreement IS 1e-6 -- and float subtraction renders that as
+# 1.0000000000001327e-06, which fails a naive ``<= 1e-6``. The gap is real but harmless: the write
+# path prices off ``close * factor`` at full precision while this cross-check prices off ``close_adj``
+# stored at 6 dp, so the two entry/exit prices differ by up to 5e-7 and can tip the 6th decimal
+# either way. 2e-6 sits above that quantisation step and still four orders of magnitude below any
+# genuine defect (a wrong exit day or a wrong price moves a return by ~1e-2).
+RETURN_TOL = 2e-6
 
 
 class Report:
@@ -347,6 +359,208 @@ def _check_aggregate(conn, rep: Report, stock_files: List[Path]) -> None:
     rep.add("aggregate", "daily_bar_monthly materialised", bool(months), f"rows={months}")
 
 
+def _recompute_return_sql(n: int) -> str:
+    """Independent re-derivation of ``ret_t{n}`` / ``excess_t{n}`` for cross-checking.
+
+    Deliberately NOT the write path's SQL (``db.record_selection._horizon_sql``). It locates the exit
+    day with ``ORDER BY ... OFFSET n`` over ``trade_calendar`` instead of a ``row_number()`` join, and
+    prices off the stored ``close_adj`` column instead of recomputing ``close * factor``. Agreement
+    between the two therefore validates the calendar arithmetic and the adjustment arithmetic
+    separately, rather than re-running one implementation against itself.
+    """
+    exit_day = f"""(SELECT c.calendar_date FROM trade_calendar c
+                    WHERE c.is_trading_day = 1 AND c.calendar_date >= p.signal_date
+                    ORDER BY c.calendar_date OFFSET {int(n)} LIMIT 1)"""
+    return f"""
+        SELECT p.signal_date, p.strategy_key, p.symbol,
+               p.ret_t{n}    AS stored_ret,
+               p.excess_t{n} AS stored_excess,
+               round((exitp.px / NULLIF(entry.px, 0) - 1)::numeric, 6) AS calc_ret,
+               round(((exitp.px / NULLIF(entry.px, 0) - 1)
+                    - (bexit.px / NULLIF(bentry.px, 0) - 1))::numeric, 6) AS calc_excess
+        FROM selection_pick p
+        LEFT JOIN LATERAL (
+            SELECT b.close_adj AS px FROM daily_bar b
+            WHERE b.symbol = p.symbol AND b.trade_date = p.signal_date AND b.trade_status = 1
+            LIMIT 1
+        ) entry ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT b.close_adj AS px FROM daily_bar b
+            WHERE b.symbol = p.symbol AND b.trade_status = 1 AND b.trade_date >= {exit_day}
+            ORDER BY b.trade_date LIMIT 1
+        ) exitp ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT ib.close AS px FROM index_daily_bar ib
+            WHERE ib.symbol = %s AND ib.trade_date = p.signal_date LIMIT 1
+        ) bentry ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT ib.close AS px FROM index_daily_bar ib
+            WHERE ib.symbol = %s AND ib.trade_date >= {exit_day}
+            ORDER BY ib.trade_date LIMIT 1
+        ) bexit ON TRUE
+        WHERE p.ret_t{n} IS NOT NULL AND p.signal_date = ANY(%s)
+        ORDER BY p.signal_date, p.symbol
+    """
+
+
+def _check_selection(conn, rep: Report, sample: int = SAMPLE_SYMBOLS) -> None:
+    """The recorded top-K picks and their realized returns.
+
+    Everything is ``warn``-level while the tables are missing or empty, so a database that has not
+    had ``record-selection`` run yet does not turn an otherwise green verify red.
+    """
+    group = "selection"
+    present = {t for t in SELECTION_TABLES + SELECTION_VIEWS
+               if dbc.scalar(conn, "SELECT to_regclass('public.' || %s)", (t,)) is not None}
+    missing = [t for t in SELECTION_TABLES + SELECTION_VIEWS if t not in present]
+    if missing:
+        # Bail out rather than half-checking: the view queries below would raise UndefinedTable, and
+        # a database that predates this schema is simply not migrated yet -- not a data defect.
+        rep.add(group, f"{len(SELECTION_TABLES)} tables + {len(SELECTION_VIEWS)} views present",
+                False, f"missing={missing} (run `run_db.py init`)", level="warn")
+        return
+    rep.add(group, f"{len(SELECTION_TABLES)} tables + {len(SELECTION_VIEWS)} views present", True,
+            f"present={sorted(present)}")
+
+    runs = dbc.scalar(conn, "SELECT count(*) FROM selection_run")
+    picks = dbc.scalar(conn, "SELECT count(*) FROM selection_pick")
+    if not runs or not picks:
+        rep.add(group, "selection tables populated", False,
+                f"runs={runs} picks={picks} -- run `run_db.py record-selection --backfill`",
+                level="warn")
+        return
+    rep.add(group, "selection tables populated", True, f"runs={runs} picks={picks}")
+
+    # The header's pick count is a denormalised copy of the child rows; a mismatch means a partial
+    # write escaped the transaction that is supposed to make delete-then-COPY atomic.
+    stale = dbc.fetch_rows(
+        conn,
+        """
+        SELECT r.signal_date, r.strategy_key, r.n_picks, count(p.symbol) AS actual
+        FROM selection_run r
+        LEFT JOIN selection_pick p
+               ON p.signal_date = r.signal_date AND p.strategy_key = r.strategy_key
+        GROUP BY r.signal_date, r.strategy_key, r.n_picks
+        HAVING r.n_picks <> count(p.symbol)
+        """,
+    )
+    rep.add(group, "selection_run.n_picks == stored picks", not stale,
+            f"{len(stale)} mismatched run(s): {stale[:3]}")
+
+    # signal_date is the day the picks are FOR, so it must be a session that actually happened;
+    # an off-by-one between the run date and the signal date shows up right here.
+    non_trading = dbc.fetch_rows(
+        conn,
+        """
+        SELECT DISTINCT r.signal_date FROM selection_run r
+        WHERE NOT EXISTS (SELECT 1 FROM trade_calendar c
+                          WHERE c.calendar_date = r.signal_date AND c.is_trading_day = 1)
+        ORDER BY 1
+        """,
+    )
+    rep.add(group, "every signal_date is a trading day", not non_trading,
+            f"{len(non_trading)} non-trading: {[str(r['signal_date']) for r in non_trading[:5]]}")
+
+    # Ranks are written 1..n by construction; a gap or a duplicate means two writers raced or the
+    # delete-then-COPY range did not cover the rows it replaced.
+    bad_rank = dbc.fetch_rows(
+        conn,
+        """
+        SELECT signal_date, strategy_key, count(*) AS n, min("rank") AS lo, max("rank") AS hi,
+               count(DISTINCT "rank") AS distinct_ranks
+        FROM selection_pick
+        GROUP BY signal_date, strategy_key
+        HAVING min("rank") <> 1 OR max("rank") <> count(*) OR count(DISTINCT "rank") <> count(*)
+        """,
+    )
+    rep.add(group, "ranks are 1..n contiguous per (signal_date, strategy_key)", not bad_rank,
+            f"{len(bad_rank)} bad group(s): {bad_rank[:3]}")
+
+    orphan = dbc.fetch_rows(
+        conn,
+        """
+        SELECT DISTINCT p.symbol FROM selection_pick p
+        WHERE NOT EXISTS (SELECT 1 FROM instrument i WHERE i.symbol = p.symbol)
+        ORDER BY 1
+        """,
+    )
+    rep.add(group, "every picked symbol is in instrument", not orphan,
+            f"unknown={orphan[:10]}")
+
+    # ret_computed_at is what tells a NULL return "not computed yet" from "computed as NULL".
+    unstamped = dbc.scalar(
+        conn,
+        """
+        SELECT count(*) FROM selection_pick
+        WHERE ret_computed_at IS NULL
+          AND (ret_t1 IS NOT NULL OR ret_t5 IS NOT NULL OR ret_t20 IS NOT NULL)
+        """,
+    )
+    rep.check(group, "every computed return carries ret_computed_at", 0, unstamped)
+
+    # A stored return implies a bar existed at or after the T+N session, so that session cannot be
+    # past the bar frontier -- catching a return fabricated from a calendar the bars do not cover.
+    frontier = dbc.scalar(conn, "SELECT max(trade_date) FROM daily_bar")
+    beyond = {}
+    for n in (1, 5, 20):
+        beyond[f"t{n}"] = dbc.scalar(
+            conn,
+            f"""
+            SELECT count(*) FROM selection_pick p
+            WHERE p.ret_t{n} IS NOT NULL
+              AND (SELECT c.calendar_date FROM trade_calendar c
+                   WHERE c.is_trading_day = 1 AND c.calendar_date >= p.signal_date
+                   ORDER BY c.calendar_date OFFSET {n} LIMIT 1) > %s
+            """,
+            (frontier,),
+        )
+    rep.add(group, f"no return priced beyond the bar frontier ({frontier})",
+            not any(beyond.values()), f"beyond={beyond}")
+
+    # Independent recomputation over a deterministic spread of signal dates.
+    dates = [r["signal_date"] for r in dbc.fetch_rows(
+        conn, "SELECT DISTINCT signal_date FROM selection_pick WHERE ret_t1 IS NOT NULL ORDER BY 1")]
+    picked_dates = _sample_dates(dates, sample)
+    bench = config.BENCHMARK
+    for n in (1, 5, 20):
+        if not picked_dates:
+            rep.add(group, f"ret_t{n} reproduces independently", True,
+                    "no computed rows yet", level="warn")
+            continue
+        rows = dbc.fetch_rows(conn, _recompute_return_sql(n), (bench, bench, picked_dates))
+        off = [r for r in rows
+               if not _close_enough(r["stored_ret"], r["calc_ret"], tol=RETURN_TOL)
+               or not _close_enough(r["stored_excess"], r["calc_excess"], tol=RETURN_TOL)]
+        rep.add(group, f"ret_t{n}/excess_t{n} reproduce independently ({len(rows)} row(s), "
+                       f"{len(picked_dates)} date(s))",
+                not off, f"{len(off)} mismatched: {off[:3]}")
+
+    # The views are the documented query surface, so check they resolve rather than just exist.
+    latest = dbc.scalar(conn, "SELECT count(*) FROM v_selection_latest")
+    dupes = dbc.scalar(
+        conn,
+        """
+        SELECT count(*) FROM (SELECT signal_date, symbol FROM v_selection_latest
+                              GROUP BY 1, 2 HAVING count(*) > 1) d
+        """,
+    )
+    rep.add(group, "v_selection_latest is one row per (signal_date, symbol)",
+            bool(latest) and not dupes, f"rows={latest} duplicated_keys={dupes}")
+
+    perf = dbc.fetch_rows(
+        conn,
+        """
+        SELECT count(*) AS days,
+               count(*) FILTER (WHERE hit_rate_t1 IS NOT NULL
+                                AND hit_rate_t1 NOT BETWEEN 0 AND 1) AS bad_rate
+        FROM v_selection_performance
+        """,
+    )[0]
+    rep.add(group, "v_selection_performance hit rates within [0, 1]",
+            bool(perf["days"]) and not perf["bad_rate"],
+            f"days={perf['days']} out_of_range={perf['bad_rate']}")
+
+
 def _check_storage(conn, rep: Report) -> None:
     for table in EXPECTED_HYPERTABLES:
         size = dbc.scalar(conn, f"SELECT pg_size_pretty(hypertable_size('{table}'::regclass))")
@@ -376,6 +590,20 @@ def _sample_files(files: List[Path], n: int) -> List[Path]:
     picks = files[:3] + files[-3:]
     picks += rng.sample(middle, max(0, n - len(picks)))
     return sorted(set(picks), key=lambda p: p.stem)
+
+
+def _sample_dates(dates: List, n: int) -> List:
+    """Deterministic spread sample of an ascending list: both ends plus seeded picks from the middle.
+
+    Same shape as :func:`_sample_files` (and the same seed) so two verify runs always inspect the
+    same rows, but without the ``Path.stem`` sorting that only makes sense for files.
+    """
+    if len(dates) <= n:
+        return list(dates)
+    rng = random.Random(SAMPLE_SEED)
+    picks = dates[:2] + dates[-2:]
+    picks += rng.sample(dates[2:-2], max(0, n - len(picks)))
+    return sorted(set(picks))
 
 
 def _close_enough(a, b, tol: float = 1e-6) -> bool:
@@ -411,6 +639,7 @@ def verify_db(raw_dir=None, sample: int = SAMPLE_SYMBOLS, dbname: str = None, qu
         _check_boards(conn, rep, expect)
         _check_aggregate(conn, rep, stock_files)
         _check_storage(conn, rep)
+        _check_selection(conn, rep, sample)
 
     text = rep.render()
     if not quiet:
