@@ -1,0 +1,43 @@
+name: Sync upstream qlib
+
+on:
+  schedule:
+    # 每周一 UTC 00:00（北京时间周一 08:00）
+    - cron: '0 0 * * 1'
+  workflow_dispatch:  # 手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/microsoft/qlib.git
+
+      - name: Fetch upstream
+        run: git fetch upstream
+
+      - name: Check for updates
+        id: check
+        run: |
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          LOCAL_SHA=$(git rev-parse origin/main)
+          if [ "$UPSTREAM_SHA" = "$LOCAL_SHA" ]; then
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Merge upstream and push
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          git merge upstream/main --no-ff -m "Merge upstream qlib/main into fork"
+          git push origin main
